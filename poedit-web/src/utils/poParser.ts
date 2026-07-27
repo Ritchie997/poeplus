@@ -11,7 +11,9 @@ import type { PoFile, PoTranslation } from '../types';
  * Parse a PO file buffer into a structured object
  */
 export function parsePoFile(buffer: Buffer | Uint8Array): PoFile {
-  const parsed = gettextParser.po.parse(buffer);
+  // Convert Uint8Array to Buffer if needed
+  const bufferToUse = buffer instanceof Buffer ? buffer : Buffer.from(buffer);
+  const parsed = gettextParser.po.parse(bufferToUse);
   return parsed as unknown as PoFile;
 }
 
@@ -19,10 +21,9 @@ export function parsePoFile(buffer: Buffer | Uint8Array): PoFile {
  * Compile a PoFile object back to a PO file buffer
  * Preserves all original formatting, comments, and headers
  */
-export function compilePoFile(poFile: PoFile, charset: string = 'utf-8'): Buffer {
+export function compilePoFile(poFile: PoFile): Buffer {
   return gettextParser.po.compile(poFile as unknown as gettextParser.GetTextTranslations, {
-    charset,
-    foldLength: false, // Don't fold long lines
+    foldLength: 0, // Don't fold long lines (0 disables folding)
   });
 }
 
