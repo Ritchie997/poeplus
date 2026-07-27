@@ -1,30 +1,358 @@
 /**
  * PO File Parser and Compiler
- * Wrapper around gettext-parser to handle PO/POT files
+ * Pure TypeScript implementation for browser compatibility
  * Preserves all metadata, comments, flags, and formatting
  */
 
-import * as gettextParser from 'gettext-parser';
-import type { PoFile, PoTranslation } from '../types';
+import type { PoFile, PoTranslation, TranslatorComment, PreviousContext } from '../types';
 
 /**
- * Parse a PO file buffer into a structured object
+ * Parse a PO file content string into a structured object
  */
-export function parsePoFile(buffer: Buffer | Uint8Array): PoFile {
-  // Convert Uint8Array to Buffer if needed
-  const bufferToUse = buffer instanceof Buffer ? buffer : Buffer.from(buffer);
-  const parsed = gettextParser.po.parse(bufferToUse);
-  return parsed as unknown as PoFile;
+export function parsePoFile(content: string): PoFile {
+  const lines = content.split(/\r?\n/);
+  const result: PoFile = {
+    charset: 'utf-8',
+    headers: {},
+    translations: {},
+  };
+
+  let currentContext = '';
+  let currentMsgid = '';
+  let currentTranslation: Partial<PoTranslation> = {};
+  let currentField: 'msgid' | 'msgid_plural' | 'msgstr' | 'msgctxt' | null = null;
+  let pendingComments: TranslatorComment = {
+    translator: [],
+    extracted: [],
+    reference: [],
+    flag: [],
+    obsolete: [],
+  };
+
+  const flushTranslation = () => {
+    if (currentMsgid || currentContext) {
+      if (!result.translations[currentContext]) {
+        result.translations[currentContext] = {};
+      }
+      
+      const translation: PoTranslation = {
+        msgid: currentTranslation.msgid || currentMsgid,
+        msgstr: currentTranslation.msgstr || [''],
+      };
+
+      if (currentTranslation.msgctxt) {
+        translation.msgctxt = currentTranslation.msgctxt;
+      }
+      if (currentTranslation.msgid_plural) {
+        translation.msgid_plural = currentTranslation.msgid_plural;
+      }
+      if (currentTranslation.fuzzy) {
+        translation.fuzzy = currentTranslation.fuzzy;
+      }
+      if (pendingComments.translator?.length || pendingComments.extracted?.length || 
+          pendingComments.reference?.length || pendingComments.flag?.length) {
+        translation.comments = { ...pendingComments };
+      }
+      if (currentTranslation.flags) {
+        translation.flags = currentTranslation.flags;
+      }
+      if (currentTranslation.previous) {
+        translation.previous = currentTranslation.previous;
+      }
+
+      result.translations[currentContext][currentMsgid] = translation;
+    }
+    
+    currentMsgid = '';
+    currentTranslation = {};
+    pendingComments = {
+      translator: [],
+      extracted: [],
+      reference: [],
+      flag: [],
+      obsolete: [],
+    };
+    currentField = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmedLine = line.trim();
+
+    // Skip empty lines - they separate entries
+    if (trimmedLine === '') {
+      if (currentField !== null && currentMsgid) {
+        flushTranslation();
+      }
+      continue;
+    }
+
+    // Comments
+    if (trimmedLine.startsWith('#.')) {
+      pendingComments.extracted?.push(trimmedLine.substring(2).trim());
+      continue;
+    }
+    if (trimmedLine.startsWith('#:')) {
+      pendingComments.reference?.push(trimmedLine.substring(2).trim());
+      continue;
+    }
+    if (trimmedLine.startsWith('#,')) {
+      const flags = trimmedLine.substring(2).trim().split(',').map(f => f.trim());
+      pendingComments.flag = [...(pendingComments.flag || []), ...flags];
+      if (flags.includes('fuzzy')) {
+        currentTranslation.fuzzy = true;
+      }
+      continue;
+    }
+    if (trimmedLine.startsWith('#|')) {
+      // Previous context - simplified handling
+      if (!currentTranslation.previous) {
+        currentTranslation.previous = {};
+      }
+      const prevLine = trimmedLine.substring(2).trim();
+      if (prevLine.startsWith('msgid ')) {
+        currentTranslation.previous.msgid = unescapePoString(prevLine.substring(6));
+      }
+      continue;
+    }
+    if (trimmedLine.startsWith('#') && !trimmedLine.startsWith('#.')) {
+      // Translator comment or other
+      const comment = trimmedLine.substring(1).trim();
+      if (comment && !comment.startsWith(':') && !comment.startsWith(',') && !comment.startsWith('|')) {
+        pendingComments.translator?.push(comment);
+      }
+      continue;
+    }
+
+    // Context
+    if (trimmedLine.startsWith('msgctxt ')) {
+      if (currentMsgid) {
+        flushTranslation();
+      }
+      currentContext = unescapePoString(trimmedLine.substring(8));
+      currentTranslation.msgctxt = currentContext;
+      currentField = 'msgctxt';
+      continue;
+    }
+
+    // Msgid
+    if (trimmedLine.startsWith('msgid ')) {
+      if (currentMsgid && currentField !== 'msgid') {
+        flushTranslation();
+      }
+      currentMsgid = unescapePoString(trimmedLine.substring(6));
+      currentTranslation.msgid = currentMsgid;
+      currentField = 'msgid';
+      continue;
+    }
+
+    // Msgid plural
+    if (trimmedLine.startsWith('msgid_plural ')) {
+      currentTranslation.msgid_plural = unescapePoString(trimmedLine.substring(13));
+      currentField = 'msgid_plural';
+      continue;
+    }
+
+    // Msgstr
+    if (trimmedLine.startsWith('msgstr ')) {
+      currentTranslation.msgstr = [unescapePoString(trimmedLine.substring(7))];
+      currentField = 'msgstr';
+      continue;
+    }
+
+    // Msgstr[n]
+    const msgstrNMatch = trimmedLine.match(/^msgstr\[(\d+)\]\s*(.*)$/);
+    if (msgstrNMatch) {
+      const index = parseInt(msgstrNMatch[1], 10);
+      const value = unescapePoString(msgstrNMatch[2]);
+      if (!currentTranslation.msgstr) {
+        currentTranslation.msgstr = [];
+      }
+      currentTranslation.msgstr[index] = value;
+      currentField = 'msgstr';
+      continue;
+    }
+
+    // Continuation lines (strings in quotes)
+    if ((trimmedLine.startsWith('"') && trimmedLine.endsWith('"')) || 
+        (trimmedLine.startsWith('"') && !trimmedLine.endsWith('"'))) {
+      const unescaped = unescapePoString(trimmedLine.replace(/^"|"$/g, ''));
+      
+      if (currentField === 'msgid') {
+        currentTranslation.msgid = (currentTranslation.msgid || '') + unescaped;
+        currentMsgid = currentTranslation.msgid;
+      } else if (currentField === 'msgid_plural') {
+        currentTranslation.msgid_plural = (currentTranslation.msgid_plural || '') + unescaped;
+      } else if (currentField === 'msgstr' && currentTranslation.msgstr) {
+        const lastIndex = currentTranslation.msgstr.length - 1;
+        currentTranslation.msgstr[lastIndex] = (currentTranslation.msgstr[lastIndex] || '') + unescaped;
+      }
+      continue;
+    }
+  }
+
+  // Flush last translation
+  flushTranslation();
+
+  // Extract headers from the empty msgid entry
+  if (result.translations[''] && result.translations['']['']) {
+    const headerTranslation = result.translations[''][''];
+    if (headerTranslation.msgstr && headerTranslation.msgstr[0]) {
+      const headerText = headerTranslation.msgstr[0];
+      const headerLines = headerText.split('\n');
+      for (const headerLine of headerLines) {
+        const colonIndex = headerLine.indexOf(':');
+        if (colonIndex > 0) {
+          const key = headerLine.substring(0, colonIndex).trim();
+          const value = headerLine.substring(colonIndex + 1).trim();
+          result.headers[key] = value;
+          
+          if (key.toLowerCase() === 'content-type') {
+            const charsetMatch = value.match(/charset=([^;\s]+)/i);
+            if (charsetMatch) {
+              result.charset = charsetMatch[1];
+            }
+          }
+        }
+      }
+    }
+    // Remove the header entry from translations
+    delete result.translations[''][''];
+  }
+
+  return result;
 }
 
 /**
- * Compile a PoFile object back to a PO file buffer
+ * Unescape a PO string literal
+ */
+function unescapePoString(str: string): string {
+  return str
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\r/g, '\r')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+/**
+ * Escape a string for PO file format
+ */
+function escapePoString(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+/**
+ * Compile a PoFile object back to a PO file string
  * Preserves all original formatting, comments, and headers
  */
-export function compilePoFile(poFile: PoFile): Buffer {
-  return gettextParser.po.compile(poFile as unknown as gettextParser.GetTextTranslations, {
-    foldLength: 0, // Don't fold long lines (0 disables folding)
-  });
+export function compilePoFile(poFile: PoFile): string {
+  const lines: string[] = [];
+
+  // Add headers as the first entry with empty msgid
+  const headerLines: string[] = [];
+  for (const [key, value] of Object.entries(poFile.headers)) {
+    headerLines.push(`${key}: ${value}`);
+  }
+  
+  if (headerLines.length > 0) {
+    lines.push('msgid ""');
+    lines.push('msgstr ""');
+    for (const headerLine of headerLines) {
+      lines.push(`"${headerLine}\\n"`);
+    }
+    lines.push('');
+  }
+
+  // Add translations
+  for (const [context, translations] of Object.entries(poFile.translations)) {
+    for (const [msgid, translation] of Object.entries(translations)) {
+      // Add comments
+      if (translation.comments) {
+        if (translation.comments.extracted) {
+          for (const comment of translation.comments.extracted) {
+            lines.push(`#. ${comment}`);
+          }
+        }
+        if (translation.comments.reference) {
+          for (const ref of translation.comments.reference) {
+            lines.push(`#: ${ref}`);
+          }
+        }
+        if (translation.comments.flag) {
+          const flagStr = translation.comments.flag.join(', ');
+          if (flagStr) {
+            lines.push(`#, ${flagStr}`);
+          }
+        }
+        if (translation.comments.translator) {
+          for (const comment of translation.comments.translator) {
+            lines.push(`# ${comment}`);
+          }
+        }
+      }
+
+      // Add fuzzy flag if set
+      if (translation.fuzzy) {
+        // Check if not already in comments.flag
+        const hasFuzzyInComments = translation.comments?.flag?.includes('fuzzy');
+        if (!hasFuzzyInComments) {
+          lines.push('#, fuzzy');
+        }
+      }
+
+      // Add context if present
+      if (translation.msgctxt) {
+        lines.push(`msgctxt "${escapePoString(translation.msgctxt)}"`);
+      }
+
+      // Add msgid
+      const msgidEscaped = escapePoString(msgid);
+      lines.push(`msgid "${msgidEscaped}"`);
+
+      // Add msgid_plural if present
+      if (translation.msgid_plural) {
+        lines.push(`msgid_plural "${escapePoString(translation.msgid_plural)}"`);
+        
+        // Add plural forms
+        if (translation.msgstr) {
+          for (let i = 0; i < translation.msgstr.length; i++) {
+            lines.push(`msgstr[${i}] "${escapePoString(translation.msgstr[i] || '')}"`);
+          }
+        }
+      } else {
+        // Singular form
+        const msgstr = translation.msgstr && translation.msgstr[0] ? translation.msgstr[0] : '';
+        lines.push(`msgstr "${escapePoString(msgstr)}"`);
+      }
+
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Parse PO file from ArrayBuffer (for file uploads)
+ */
+export function parsePoFileFromBuffer(buffer: ArrayBuffer | Uint8Array): PoFile {
+  const decoder = new TextDecoder('utf-8');
+  const content = decoder.decode(buffer);
+  return parsePoFile(content);
+}
+
+/**
+ * Convert PoFile to downloadable Blob
+ */
+export function poFileToBlob(poFile: PoFile, filename: string = 'translations.po'): Blob {
+  const content = compilePoFile(poFile);
+  return new Blob([content], { type: 'text/plain;charset=utf-8' });
 }
 
 /**
@@ -32,19 +360,6 @@ export function compilePoFile(poFile: PoFile): Buffer {
  */
 export function getHeaders(poFile: PoFile): Record<string, string> {
   return poFile.headers || {};
-}
-
-/**
- * Update a specific header value
- */
-export function updateHeader(poFile: PoFile, key: string, value: string): PoFile {
-  return {
-    ...poFile,
-    headers: {
-      ...poFile.headers,
-      [key]: value,
-    },
-  };
 }
 
 /**
@@ -76,8 +391,6 @@ export function flattenTranslations(poFile: PoFile): Array<{
   
   for (const [context, translations] of Object.entries(poFile.translations)) {
     for (const [msgid, translation] of Object.entries(translations)) {
-      // Skip empty msgid (it contains headers)
-      if (msgid === '') continue;
       rows.push({ context, msgid, translation });
     }
   }

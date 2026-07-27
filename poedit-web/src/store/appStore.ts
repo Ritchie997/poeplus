@@ -81,7 +81,9 @@ export const useAppStore = create<AppState>()(
       // Load PO file from buffer
       loadPoFile: (buffer: Uint8Array, fileName: string) => {
         try {
-          const poFile = parsePoFile(Buffer.from(buffer));
+          const decoder = new TextDecoder('utf-8');
+          const content = decoder.decode(buffer);
+          const poFile = parsePoFile(content);
           const flattened = flattenTranslations(poFile);
           
           const rows: TranslationRow[] = flattened.map(({ context, msgid, translation }) => {
@@ -113,8 +115,8 @@ export const useAppStore = create<AppState>()(
         }
       },
       
-      // Compile and return PO file buffer
-      savePoFile: () => {
+      // Compile and return PO file as Uint8Array
+      savePoFile: (): Uint8Array | null => {
         const { poFile } = get();
         if (!poFile) return null;
         
@@ -142,7 +144,9 @@ export const useAppStore = create<AppState>()(
           translations: updatedTranslations,
         };
         
-        return compilePoFile(updatedPoFile);
+        const content = compilePoFile(updatedPoFile);
+        const encoder = new TextEncoder();
+        return encoder.encode(content);
       },
       
       // Update a single translation
