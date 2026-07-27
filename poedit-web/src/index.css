@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Custom theme configuration for Tailwind v4 */
+@theme {
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+}
+
 /* Custom scrollbar styles */
 ::-webkit-scrollbar {
   width: 8px;
