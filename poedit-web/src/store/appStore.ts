@@ -139,11 +139,10 @@ export const useAppStore = create<AppState>()(
         
         const updatedPoFile: PoFile = {
           ...poFile,
-          charset: poFile.charset || 'utf-8',
           translations: updatedTranslations,
         };
         
-        return compilePoFile(updatedPoFile, updatedPoFile.charset);
+        return compilePoFile(updatedPoFile);
       },
       
       // Update a single translation
